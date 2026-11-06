@@ -1,3 +1,215 @@
+diff --git a/src-tauri/src/core/owner_identity.rs b/src-tauri/src/core/owner_identity.rs
+index b730fabb..45c446dd 100644
+--- a/src-tauri/src/core/owner_identity.rs
++++ b/src-tauri/src/core/owner_identity.rs
+@@ -110,7 +110,8 @@ mod windows_owner {
+         BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, FILE_ALL_ACCESS, FILE_ATTRIBUTE_DIRECTORY,
+         FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+         FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_DISK,
+-        GetFileInformationByHandle, GetFileType, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
++        GetFileInformationByHandle, GetFileType, GetVolumeInformationW, OPEN_ALWAYS, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
++        WRITE_OWNER,
+     };
+     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+ 
+@@ -123,6 +124,136 @@ mod windows_owner {
+         crate::utils::server::INSTANCE_LOCK_FILE,
+     ];
+ 
++    /// `GetVolumeInformationW` reports whether the volume storing `path` persists ACLs.
++    /// NTFS/ReFS do (`FILE_PERSISTENT_ACLS`); exFAT/FAT32 do not, and SID-based owner
++    /// checks cannot run there at all. Query failures are treated as ACL-capable so an
++    /// unknown environment keeps the strict behavior instead of silently skipping checks.
++    const FILE_PERSISTENT_ACLS: u32 = 0x00000008;
++
++    fn fs_supports_acls(path: &Path) -> bool {
++        let root = match path.components().next() {
++            Some(std::path::Component::Prefix(prefix)) => {
++                // `canonicalize` yields verbatim prefixes (`\\?\D:`, `\\?\UNC\...`), which
++                // GetVolumeInformationW rejects — normalize them back to drive/UNC roots.
++                let raw = prefix.as_os_str().to_string_lossy().into_owned();
++                let mut root = if let Some(unc) = raw.strip_prefix("\\\\?\\UNC\\") {
++                    format!("\\\\{unc}")
++                } else if let Some(rest) = raw.strip_prefix("\\\\?\\") {
++                    rest.to_string()
++                } else {
++                    raw
++                };
++                root.push('\\');
++                std::path::PathBuf::from(root)
++            }
++            _ => return true,
++        };
++        let wide = match wide_path(&root) {
++            Ok(wide) => wide,
++            Err(_) => return true,
++        };
++        let mut flags = 0_u32;
++        let ok = unsafe {
++            GetVolumeInformationW(
++                wide.as_ptr(),
++                std::ptr::null_mut(),
++                0,
++                std::ptr::null_mut(),
++                std::ptr::null_mut(),
++                &mut flags,
++                std::ptr::null_mut(),
++                0,
++            )
++        };
++        ok == 0 || (flags & FILE_PERSISTENT_ACLS) != 0
++    }
++
++    /// The shared half of the plain-volume validation: refuse directories, reparse points and non-disk media.
++    fn check_ordinary_file(file: &std::fs::File, what: &str) -> Result<()> {
++        let mut information = BY_HANDLE_FILE_INFORMATION::default();
++        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
++            return Err(std::io::Error::last_os_error()).with_context(|| format!("failed to inspect {what}"));
++        }
++        if information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
++            || unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK
++        {
++            bail!("{what} is not an ordinary file");
++        }
++        Ok(())
++    }
++
++    /// Fallback for volumes without ACL support: ordinary open, no owner or DACL validation.
++    fn open_lock_file_plain(path: &Path) -> Result<std::fs::File> {
++        let wide = wide_path(path)?;
++        let handle = unsafe {
++            CreateFileW(
++                wide.as_ptr(),
++                GENERIC_READ | GENERIC_WRITE,
++                // Replacing a live lock would let a second instance lock a different file.
++                FILE_SHARE_READ | FILE_SHARE_WRITE,
++                std::ptr::null(),
++                OPEN_ALWAYS,
++                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
++                std::ptr::null_mut(),
++            )
++        };
++        if handle == INVALID_HANDLE_VALUE {
++            return Err(std::io::Error::last_os_error()).context("failed to open current-user lock file");
++        }
++        let file = unsafe { std::fs::File::from_raw_handle(handle) };
++        check_ordinary_file(&file, "current-user lock")?;
++        let mut information = BY_HANDLE_FILE_INFORMATION::default();
++        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
++            return Err(std::io::Error::last_os_error()).context("failed to inspect current-user lock file");
++        }
++        if information.nNumberOfLinks != 1 {
++            bail!("current-user lock is not an ordinary, single-link file");
++        }
++        Ok(file)
++    }
++
++    fn create_private_file_plain(path: &Path) -> Result<std::fs::File> {
++        let wide = wide_path(path)?;
++        let handle = unsafe {
++            CreateFileW(
++                wide.as_ptr(),
++                GENERIC_READ | GENERIC_WRITE,
++                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                std::ptr::null(),
++                CREATE_NEW,
++                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
++                std::ptr::null_mut(),
++            )
++        };
++        if handle == INVALID_HANDLE_VALUE {
++            return Err(std::io::Error::last_os_error()).context("failed to create private current-user file");
++        }
++        let file = unsafe { std::fs::File::from_raw_handle(handle) };
++        check_ordinary_file(&file, "current-user file")?;
++        Ok(file)
++    }
++
++    fn open_private_file_plain(path: &Path) -> Result<std::fs::File> {
++        let wide = wide_path(path)?;
++        let handle = unsafe {
++            CreateFileW(
++                wide.as_ptr(),
++                GENERIC_READ | GENERIC_WRITE,
++                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
++                std::ptr::null(),
++                OPEN_EXISTING,
++                FILE_FLAG_OPEN_REPARSE_POINT,
++                std::ptr::null_mut(),
++            )
++        };
++        if handle == INVALID_HANDLE_VALUE {
++            return Err(std::io::Error::last_os_error()).context("failed to open private current-user file");
++        }
++        let file = unsafe { std::fs::File::from_raw_handle(handle) };
++        check_ordinary_file(&file, "current-user file")?;
++        Ok(file)
++    }
++
+     pub(super) fn current_sid() -> Result<String> {
+         let mut token = std::ptr::null_mut();
+         if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+@@ -146,6 +277,9 @@ mod windows_owner {
+     }
+ 
+     pub(super) fn load_or_create_token(app_data_root: &Path, sid: &str) -> Result<String> {
++        if !fs_supports_acls(app_data_root) {
++            bail!("Service Mode requires an ACL-capable filesystem (NTFS); exFAT/FAT volumes are not supported");
++        }
+         let token_path = app_data_root.join(OWNER_TOKEN_FILE_NAME);
+         let descriptor = LocalSecurityDescriptor::from_sid(sid)?;
+         let attributes = SECURITY_ATTRIBUTES {
+@@ -202,12 +336,18 @@ mod windows_owner {
+     }
+ 
+     pub(super) fn create_private_file(path: &Path) -> Result<std::fs::File> {
++        if !fs_supports_acls(path) {
++            return create_private_file_plain(path);
++        }
+         let sid = current_sid()?;
+         let descriptor = LocalSecurityDescriptor::from_sid(&sid)?;
+         create_file(path, &descriptor)
+     }
+ 
+     pub(super) fn open_private_file(path: &Path) -> Result<std::fs::File> {
++        if !fs_supports_acls(path) {
++            return open_private_file_plain(path);
++        }
+         let sid = current_sid()?;
+         let descriptor = LocalSecurityDescriptor::from_sid(&sid)?;
+         let file = open_file(path)?;
+@@ -216,6 +356,9 @@ mod windows_owner {
+     }
+ 
+     pub(super) fn open_or_create_lock_file(path: &Path) -> Result<std::fs::File> {
++        if !fs_supports_acls(path) {
++            return open_lock_file_plain(path);
++        }
+         let sid = current_sid()?;
+         let descriptor = LocalSecurityDescriptor::from_sid(&sid)?;
+         let attributes = SECURITY_ATTRIBUTES {
+@@ -425,6 +568,11 @@ mod windows_owner {
+         let root = std::fs::canonicalize(root).context("failed to canonicalize the application data root")?;
+         let root = root.as_path();
+ 
++        if !fs_supports_acls(root) {
++            // exFAT/FAT volumes cannot store ACLs; there is nothing to repair or verify.
++            return Ok(());
++        }
++
+         let sid = current_sid()?;
+         let descriptor = LocalSecurityDescriptor::from_sid(&sid)?;
+         let expected = descriptor.owner()?;
+@@ -456,6 +604,9 @@ mod windows_owner {
+ 
+     /// Drops the reserved files an earlier account left behind, so they are recreated for this one.
+     fn drop_files_owned_by_others(root: &Path, expected: PSID) -> Result<()> {
++        if !fs_supports_acls(root) {
++            return Ok(());
++        }
+         for name in REGENERATED_FILES {
+             let path = root.join(name);
+             let ours = match open_no_reparse(&path, false, READ_CONTROL) {
 diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
 index 7e11e5c0..53cbe355 100644
 --- a/src-tauri/src/lib.rs

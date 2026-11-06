@@ -10,10 +10,10 @@
 
 ## 使用
 
-1. 解压到任意**本地 NTFS** 目录，例如 `D:\Tools\ClashVerge`
+1. 解压到本地目录，例如 `D:\Tools\ClashVerge`（NTFS 最佳；exFAT/FAT32 盘也可以，见下方说明）
 2. 双击 `clash-verge.exe`
 3. 所有数据（订阅、设置、内核配置）保存在 `<解压目录>\.config\` 中，整个文件夹可拷贝/备份
-4. 不依赖 `%APPDATA%`，U 盘随身模式可用（服务模式限制见下）
+4. 不依赖 `%APPDATA%`，U 盘随身模式可用（exFAT 下服务模式不可用，见下方说明）
 
 ## 与官方正式版的区别
 
@@ -27,8 +27,15 @@
 
 ## 注意事项
 
-- **服务模式**（需要管理员权限的 TUN / 系统代理服务）：便携目录必须放在**本地 NTFS 盘**、由当前用户拥有，
-  否则上游的所有权校验（`AppDataRootNotOwned`）会拒绝启动内核。U 盘 / exFAT 请在设置里改用 **Sidecar** 运行模式。
+- **运行模式（NTFS vs exFAT/FAT32）**：
+  - **NTFS 等支持 ACL 的卷**：行为与上游一致，全功能，含服务模式。
+  - **exFAT / FAT32 等不支持 ACL 的卷**（常见于 U 盘）：本 fork 自 portable-v2.5.10 起可以直接启动。
+    启动时通过 `GetVolumeInformationW` 的 `FILE_PERSISTENT_ACLS` 标志识别这类卷，自动跳过基于 SID 的
+    属主校验（上游的校验在无 ACL 的卷上永远失败，会报 `current-user lock belongs to a different Windows user`）。
+    此时"单例"仍然有效（系统文件锁，同一时间只能运行一个实例），但：
+    - **服务模式不可用**（拥有者令牌认证同样依赖 SID），请在设置里改用 **Sidecar** 运行模式；
+    - `.config` 没有任何权限位保护，同机其他账号可读写你的配置/订阅，**仅限自己使用**；
+    - 未知文件系统如无法确认支持 ACL，会按 NTFS 的严格路径处理（fail-closed）。
 - **WebView2 Runtime**：不随便携版附带，Windows 10 1803+ / Windows 11 一般自带。
 - **更新方式**：应用会检测新版（检查源为本仓库 `releases/latest/download/update.json`），点"更新"按钮会跳转到本仓库 Releases 页面下载新的 `portable-vX.Y.Z` 压缩包，解压覆盖旧目录即可（`.config` 会保留）。
   之所以不做应用内自动安装，是因为便携版（zip）无法走 Clash Verge 的 NSIS 自更新通道，强行做会装成另一份非便携官方版。
@@ -42,6 +49,7 @@
 2. `src-tauri/src/lib.rs` — 在所有数据目录访问之前初始化该标记
 3. `src-tauri/tauri.conf.json` — `createUpdaterArtifacts=false`，自更新端点指向本仓库的 `releases/latest/download/update.json`
 4. `src/components/setting/mods/update-viewer.tsx` — 点"更新"按钮跳转到本仓库便携版 release 页面
+5. `src-tauri/src/core/owner_identity.rs` — 在不支持 ACL 的卷（exFAT/FAT32）上跳过基于 SID 的属主校验，改为普通文件创建/锁定
 
 CI（`.github/workflows/portable-build.yml`）每天运行：
 
