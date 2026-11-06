@@ -172,9 +172,9 @@ jobs:
           New-Item -ItemType Directory -Force $stage | Out-Null
           # 静默安装到暂存目录，得到官方安装包完全一致的文件布局
           Start-Process -FilePath $setup.FullName -ArgumentList '/S', "/D=$stage" -Wait
-          if (-not (Test-Path (Join-Path $stage 'Clash Verge.exe'))) {
+          if (-not (Test-Path (Join-Path $stage 'clash-verge.exe'))) {
             Get-ChildItem $stage -Recurse -ErrorAction SilentlyContinue | Select-Object -First 30 -ExpandProperty FullName
-            throw 'Staging failed: Clash Verge.exe not found'
+            throw 'Staging failed: clash-verge.exe not found'
           }
           # 去掉卸载器等安装专用文件
           Remove-Item -Force (Join-Path $stage 'unins*') -ErrorAction SilentlyContinue
@@ -210,7 +210,7 @@ jobs:
           - ⚠️ 非官方构建，不提供任何担保；要自动更新请自行构建或换用上游正式版
 
           ## 使用
-          解压到任意本地目录，双击 \`Clash Verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
+          解压到任意本地目录，双击 \`clash-verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
 
           上游更新日志见：https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}"
 

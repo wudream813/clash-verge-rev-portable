@@ -11,7 +11,7 @@
 ## 使用
 
 1. 解压到任意**本地 NTFS** 目录，例如 `D:\Tools\ClashVerge`
-2. 双击 `Clash Verge.exe`
+2. 双击 `clash-verge.exe`
 3. 所有数据（订阅、设置、内核配置）保存在 `<解压目录>\.config\` 中，整个文件夹可拷贝/备份
 4. 不依赖 `%APPDATA%`，U 盘随身模式可用（服务模式限制见下）
 
