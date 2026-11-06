@@ -1,0 +1,225 @@
+name: Build Portable Release
+
+# 每天 03:23（Asia/Shanghai）检查上游是否有新的稳定版 tag；
+# 有则把 portable 分支 rebase 到新 tag 上（补丁冲突时自动开 issue），
+# 然后用 windows-latest 构建便携版并发布到 Releases。
+# 也可以在 Actions 页面手动 Run workflow（force=true 可强制重装同一版本）。
+
+on:
+  schedule:
+    - cron: '23 19 * * *' # 19:23 UTC = 次日 03:23 CST
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force rebuild & re-release even if the release already exists'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [portable]
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: portable-build
+  cancel-in-progress: false
+
+env:
+  HUSKY: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  update-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    # 避免 bot 自己的 rebase 推送又触发一次构建
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout portable branch
+        uses: actions/checkout@v7
+        with:
+          ref: portable
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch upstream tags, find latest stable tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/clash-verge-rev/clash-verge-rev.git || true
+          git fetch upstream --tags --no-recurse-submodules
+          LATEST=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)
+          echo "Latest stable upstream tag: $LATEST"
+          echo "latest=$LATEST" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$LATEST" HEAD; then
+            echo "needs_rebase=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_rebase=true" >> "$GITHUB_OUTPUT"
+            echo "portable branch is based on an older release, will rebase onto $LATEST"
+          fi
+
+      - name: Rebase portable branch onto the new upstream tag
+        id: rebase
+        if: steps.tag.outputs.needs_rebase == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          LATEST='${{ steps.tag.outputs.latest }}'
+          # 我们自己的提交（补丁 + 文档/CI），按顺序回放到新 tag 上
+          SHAS=$(git rev-list --reverse "$LATEST"..HEAD)
+          echo "Our commits to replay: $SHAS"
+          git checkout -B portable "$LATEST"
+          for sha in $SHAS; do
+            git cherry-pick "$sha"
+          done
+          git push --force-with-lease origin portable
+
+      - name: Open issue when rebase fails
+        if: failure() && steps.tag.outputs.needs_rebase == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "portable build: rebase onto ${{ steps.tag.outputs.latest }} failed" \
+            --body "自动构建未能把便携补丁回放到上游 ${{ steps.tag.outputs.latest }}。
+
+          请本地处理：
+          \`\`\`bash
+          git fetch upstream --tags
+          git checkout -B portable ${{ steps.tag.outputs.latest }}
+          git cherry-pick portable@{1}   # 或手动重新应用便携补丁
+          git push --force-with-lease origin portable
+          \`\`\`
+
+          参考日志：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+          echo "tag=portable-v$v" >> $env:GITHUB_OUTPUT
+
+      - name: Check if this version is already released
+        id: rel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG='${{ steps.ver.outputs.tag }}'
+          FORCE='${{ inputs.force || false }}'
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $TAG already exists, skipping build."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pnpm
+        if: steps.rel.outputs.exists != 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Install Node
+        if: steps.rel.outputs.exists != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.0'
+
+      - name: Install Rust stable
+        if: steps.rel.outputs.exists != 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.1'
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        if: steps.rel.outputs.exists != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: pnpm install & prebuild (download mihomo core)
+        if: steps.rel.outputs.exists != 'true'
+        run: |
+          pnpm i
+          pnpm run prebuild x86_64-pc-windows-msvc
+
+      - name: Tauri build (NSIS installer)
+        if: steps.rel.outputs.exists != 'true'
+        run: pnpm tauri build --target x86_64-pc-windows-msvc
+        env:
+          NODE_OPTIONS: '--max-old-space-size=4096'
+
+      - name: Repackage installer output as portable zip
+        if: steps.rel.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem 'target\x86_64-pc-windows-msvc\release\bundle\nsis' -Filter '*setup*.exe' | Select-Object -First 1
+          if (-not $setup) { throw 'NSIS installer not found' }
+          Write-Host "Repackaging $($setup.FullName)"
+          $stageRoot = 'C:\portable-stage'
+          $stage = Join-Path $stageRoot 'Clash Verge'
+          Remove-Item -Recurse -Force $stageRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          # 静默安装到暂存目录，得到官方安装包完全一致的文件布局
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S', "/D=$stage" -Wait
+          if (-not (Test-Path (Join-Path $stage 'Clash Verge.exe'))) {
+            Get-ChildItem $stage -Recurse -ErrorAction SilentlyContinue | Select-Object -First 30 -ExpandProperty FullName
+            throw 'Staging failed: Clash Verge.exe not found'
+          }
+          # 去掉卸载器等安装专用文件
+          Remove-Item -Force (Join-Path $stage 'unins*') -ErrorAction SilentlyContinue
+          Remove-Item -Force (Join-Path $stage 'uninst*') -ErrorAction SilentlyContinue
+          Remove-Item -Force (Join-Path $stage 'uninstall*') -ErrorAction SilentlyContinue
+          # 注入便携模式标记
+          New-Item -ItemType Directory -Force (Join-Path $stage '.config') | Out-Null
+          New-Item -ItemType File -Force (Join-Path $stage '.config\PORTABLE') | Out-Null
+          Compress-Archive -Path $stage -DestinationPath "Clash.Verge_${{ steps.ver.outputs.version }}_x64-portable.zip" -Force
+          Get-Item "Clash.Verge_${{ steps.ver.outputs.version }}_x64-portable.zip"
+
+      - name: Publish GitHub Release
+        if: steps.rel.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          UPSTREAM_TAG='${{ steps.tag.outputs.latest }}'
+          VERSION='${{ steps.ver.outputs.version }}'
+          gh release create "${{ steps.ver.outputs.tag }}" \
+            "Clash.Verge_${VERSION}_x64-portable.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target portable \
+            --title "Clash Verge Rev v${VERSION} 便携版（非官方构建）" \
+            --notes "非官方便携版，跟进上游 [v${VERSION}](https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}) 自动构建。
+
+          ## 与官方正式版的区别
+          - ✅ 恢复便携模式：程序目录下的 \`.config\\PORTABLE\` 文件存在时，全部数据保存在 \`<程序目录>\\.config\\io.github.clash-verge-rev.clash-verge-rev\`（v2.5.4 起官方已移除该功能）
+          - ✅ 已禁用应用内自更新：避免被官方安装包覆盖后丢失便携能力
+          - ✅ 完整保留官方功能（订阅、规则、TUN、服务模式等）
+          - ⚠️ 不包含内置 WebView2：Windows 10 1803+ / Windows 11 自带 WebView2 Runtime；缺少时请先安装
+          - ⚠️ **服务模式**（需要管理员权限的 TUN/系统服务）：便携目录必须放在**本地 NTFS 盘**且由当前用户拥有；放 U 盘/exFAT 时请在「设置 → 运行模式」改用 **Sidecar**
+          - ⚠️ 非官方构建，不提供任何担保；要自动更新请自行构建或换用上游正式版
+
+          ## 使用
+          解压到任意本地目录，双击 \`Clash Verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
+
+          上游更新日志见：https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}"
+
+      - name: Open issue on unexpected failure
+        if: failure() && steps.rel.outputs.exists != 'true' && steps.tag.outputs.needs_rebase != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "portable build failed for v${{ steps.ver.outputs.version }} (${{ github.run_id }})" \
+            --body "构建 v${{ steps.ver.outputs.version }} 便携版失败，日志见：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
