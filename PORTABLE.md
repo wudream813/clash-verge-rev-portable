@@ -21,7 +21,7 @@
 | --- | --- | --- |
 | 便携模式（`.config/PORTABLE`） | ❌ v2.5.4 起移除 | ✅ 已恢复 |
 | 数据目录 | `%APPDATA%\io.github.clash-verge-rev.clash-verge-rev` | `<程序目录>\.config\io.github.clash-verge-rev.clash-verge-rev` |
-| 应用内自更新 | ✅（可能把你覆盖成非便携版） | ❌ **已禁用** |
+| 应用内更新检查 | ✅（会覆盖成非便携版） | ✅ **会提示并跳转本仓库 Releases 下载**（不静默安装） |
 | 其余功能 | 全部 | 与上游同步（每日自动跟进） |
 | 签名/公证 | 官方签名 | 无签名，SmartScreen 可能提示 |
 
@@ -30,7 +30,8 @@
 - **服务模式**（需要管理员权限的 TUN / 系统代理服务）：便携目录必须放在**本地 NTFS 盘**、由当前用户拥有，
   否则上游的所有权校验（`AppDataRootNotOwned`）会拒绝启动内核。U 盘 / exFAT 请在设置里改用 **Sidecar** 运行模式。
 - **WebView2 Runtime**：不随便携版附带，Windows 10 1803+ / Windows 11 一般自带。
-- **自动更新**：已禁用。升级方式 = 下载新的 `portable-vX.Y.Z` 压缩包解压覆盖旧目录（`.config` 会保留）。
+- **更新方式**：应用会检测新版（检查源为本仓库 `releases/latest/download/update.json`），点"更新"按钮会跳转到本仓库 Releases 页面下载新的 `portable-vX.Y.Z` 压缩包，解压覆盖旧目录即可（`.config` 会保留）。
+  之所以不做应用内自动安装，是因为便携版（zip）无法走 Clash Verge 的 NSIS 自更新通道，强行做会装成另一份非便携官方版。
 - 官方不认可本构建，出问题请对比上游正式版行为。
 
 ## 这个仓库是怎么运作的
@@ -39,13 +40,14 @@
 
 1. `src-tauri/src/utils/dirs.rs` — 恢复 `init_portable_flag()`：exe 同目录存在 `.config\PORTABLE` 时，数据目录指向 `<exe>\.config\io.github.clash-verge-rev.clash-verge-rev`
 2. `src-tauri/src/lib.rs` — 在所有数据目录访问之前初始化该标记
-3. `src-tauri/tauri.conf.json` — `createUpdaterArtifacts=false`，自更新端点指向不可达地址（防止被官方版覆盖）
+3. `src-tauri/tauri.conf.json` — `createUpdaterArtifacts=false`，自更新端点指向本仓库的 `releases/latest/download/update.json`
+4. `src/components/setting/mods/update-viewer.tsx` — 点"更新"按钮跳转到本仓库便携版 release 页面
 
 CI（`.github/workflows/portable-build.yml`）每天运行：
 
 1. 检查上游最新稳定版 tag（如 `v2.5.11`）
 2. 若分支落后，把补丁 commit rebase 到新 tag 上并 force-push；冲突时自动开 issue
-3. 若该版本尚无 `portable-v<版本>` release，则构建 NSIS 安装包 → 静默安装到暂存目录 → 删卸载器 → 注入空的 `.config\PORTABLE` → 打包 zip 并发布 release
+3. 若该版本尚无 `portable-v<版本>` release，则构建 NSIS 安装包 → 静默安装到暂存目录 → 删卸载器 → 注入空的 `.config\PORTABLE` → 打包 zip 并发布 release（同时上传 `update.json` 供应用内检查更新）
 
 ## 手动构建
 

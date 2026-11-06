@@ -14,12 +14,7 @@ import type { Options as ReactMarkdownOptions } from 'react-markdown'
 
 import { BaseDialog, DialogRef } from '@/components/base'
 import { useUpdate } from '@/hooks/use-update'
-import type { DownloadEvent } from '@/services/bindings'
-import {
-  cancelUpdateDownload,
-  installUpdate,
-  restartApp,
-} from '@/services/cmds'
+import { cancelUpdateDownload } from '@/services/cmds'
 import { mutate } from '@/services/mutate'
 import { showNotice } from '@/services/notice-service'
 import { useSetUpdateState, useUpdateState } from '@/services/states'
@@ -234,66 +229,15 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
     return updateInfo?.body.toLowerCase().includes('break change')
   }, [updateInfo])
 
+  // Portable fork: 不通过应用内下载安装（便携版无法替换正在运行的 exe，
+  // 且 tauri updater 只支持安装 NSIS 安装包）。点击"更新"按钮时把用户带到
+  // 本仓库的便携版 release 页面，由用户自行下载解压覆盖。
   const onUpdate = useLockFn(async () => {
-    if (!updateInfo?.body) return
-    if (breakChangeFlag) {
-      showNotice.error('settings.modals.update.messages.breakChangeError')
-      return
-    }
-    if (updateState) return
-    setUpdateState(true)
-    setDownloaded(0)
-    setTotal(0)
-    downloadedRef.current = 0
-    totalRef.current = 0
-
-    const onDownloadEvent = (event: DownloadEvent) => {
-      if (event.event === 'Started') {
-        const contentLength = event.data.contentLength ?? 0
-        totalRef.current = contentLength
-        setTotal(contentLength)
-        setDownloaded(0)
-        downloadedRef.current = 0
-        return
-      }
-
-      if (event.event === 'Progress') {
-        setDownloaded((prev) => {
-          const next = prev + event.data.chunkLength
-          downloadedRef.current = next
-          return next
-        })
-      }
-
-      if (event.event === 'Finished' && totalRef.current === 0) {
-        totalRef.current = downloadedRef.current
-        setTotal(downloadedRef.current)
-      }
-    }
-
-    try {
-      const result = await mutate(
-        () => installUpdate(updateInfo.version, onDownloadEvent),
-        {
-          id: 'install-app-update',
-          errorNotice: false,
-        },
-      )
-      if (result.ok && result.value) {
-        await mutate(() => restartApp(), {
-          id: 'restart-app',
-          errorNotice: false,
-        })
-      }
-    } catch (err: any) {
-      showNotice.error(err)
-    } finally {
-      setUpdateState(false)
-      setDownloaded(0)
-      setTotal(0)
-      downloadedRef.current = 0
-      totalRef.current = 0
-    }
+    if (!updateInfo?.version) return
+    openUrlWithNotice(
+      `https://github.com/wudream813/clash-verge-rev-portable/releases/tag/portable-v${updateInfo.version}`,
+    )
+    setOpen(false)
   })
 
   return (
@@ -328,7 +272,7 @@ export function UpdateViewer({ ref }: { ref?: Ref<DialogRef> }) {
             sx={{ whiteSpace: 'nowrap' }}
             onClick={() => {
               openUrlWithNotice(
-                `https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/v${updateInfo?.version}`,
+                `https://github.com/wudream813/clash-verge-rev-portable/releases/tag/portable-v${updateInfo?.version}`,
               )
             }}
           >

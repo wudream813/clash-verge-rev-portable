@@ -186,6 +186,27 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath "Clash.Verge_${{ steps.ver.outputs.version }}_x64-portable.zip" -Force
           Get-Item "Clash.Verge_${{ steps.ver.outputs.version }}_x64-portable.zip"
 
+      - name: Generate update.json (for the in-app update check)
+        if: steps.rel.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $v = '${{ steps.ver.outputs.version }}'
+          $pubDate = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+          $notes = "便携版 v$v。请下载新的 portable 压缩包，解压覆盖旧目录即可（同目录 .config 数据会保留）。上游更新内容见：https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/v$v"
+          $manifest = [ordered]@{
+            version   = $v
+            notes     = $notes
+            pub_date  = $pubDate
+            platforms = @{
+              'windows-x86_64' = [ordered]@{
+                signature = 'unsigned'
+                url       = "https://github.com/wudream813/clash-verge-rev-portable/releases/download/portable-v$v/Clash.Verge_${v}_x64-portable.zip"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 6 | Out-File update.json -Encoding utf8
+          Get-Content update.json
+
       - name: Publish GitHub Release
         if: steps.rel.outputs.exists != 'true'
         shell: bash
@@ -194,25 +215,37 @@ jobs:
         run: |
           UPSTREAM_TAG='${{ steps.tag.outputs.latest }}'
           VERSION='${{ steps.ver.outputs.version }}'
-          gh release create "${{ steps.ver.outputs.tag }}" \
-            "Clash.Verge_${VERSION}_x64-portable.zip" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target portable \
-            --title "Clash Verge Rev v${VERSION} 便携版（非官方构建）" \
-            --notes "非官方便携版，跟进上游 [v${VERSION}](https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}) 自动构建。
+          TAG='${{ steps.ver.outputs.tag }}'
+          cat > release-notes.md << EOF
+          非官方便携版，跟进上游 [v${VERSION}](https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}) 自动构建。
 
           ## 与官方正式版的区别
           - ✅ 恢复便携模式：程序目录下的 \`.config\\PORTABLE\` 文件存在时，全部数据保存在 \`<程序目录>\\.config\\io.github.clash-verge-rev.clash-verge-rev\`（v2.5.4 起官方已移除该功能）
-          - ✅ 已禁用应用内自更新：避免被官方安装包覆盖后丢失便携能力
+          - ✅ 应用内"检查更新"会提示新版本，点"更新"按钮将跳转到本仓库下载便携版压缩包（便携版无法自我替换 exe，故不自动安装）
           - ✅ 完整保留官方功能（订阅、规则、TUN、服务模式等）
           - ⚠️ 不包含内置 WebView2：Windows 10 1803+ / Windows 11 自带 WebView2 Runtime；缺少时请先安装
           - ⚠️ **服务模式**（需要管理员权限的 TUN/系统服务）：便携目录必须放在**本地 NTFS 盘**且由当前用户拥有；放 U 盘/exFAT 时请在「设置 → 运行模式」改用 **Sidecar**
-          - ⚠️ 非官方构建，不提供任何担保；要自动更新请自行构建或换用上游正式版
+          - ⚠️ 非官方构建，不提供任何担保；要正式版请使用上游官方构建
 
           ## 使用
           解压到任意本地目录，双击 \`clash-verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
 
-          上游更新日志见：https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}"
+          ## 升级
+          下载新版本 zip，解压覆盖旧目录即可（\`.config\` 数据会保留）。
+
+          上游更新日志见：https://github.com/clash-verge-rev/clash-verge-rev/releases/tag/${UPSTREAM_TAG}
+          EOF
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG exists, overwriting assets"
+            gh release upload "$TAG" "Clash.Verge_${VERSION}_x64-portable.zip" update.json --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "Clash Verge Rev v${VERSION} 便携版（非官方构建）" --notes-file release-notes.md
+          else
+            gh release create "$TAG" "Clash.Verge_${VERSION}_x64-portable.zip" update.json \
+              --repo "$GITHUB_REPOSITORY" \
+              --target portable \
+              --title "Clash Verge Rev v${VERSION} 便携版（非官方构建）" \
+              --notes-file release-notes.md
+          fi
 
       - name: Open issue on unexpected failure
         if: failure() && steps.rel.outputs.exists != 'true' && steps.tag.outputs.needs_rebase != 'true'
