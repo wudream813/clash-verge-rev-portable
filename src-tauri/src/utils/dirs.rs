@@ -8,6 +8,31 @@ use std::{
 };
 use tauri::Manager as _;
 
+/// Set by [`init_portable_flag`]; read by [`app_home_dir`].
+///
+/// Portable mode is portable edition behavior removed upstream in v2.5.4:
+/// when an (empty) `PORTABLE` file exists in the `.config` directory next to the
+/// executable, ALL app data lives in `<exe dir>\.config\<APP_ID>` instead of the
+/// system data directory.
+pub static PORTABLE_FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Detect portable mode. Must run before anything resolves the app data directory
+/// (e.g. before the Windows preinit owner-repair in `run()`).
+///
+/// Best-effort: any failure falls back to non-portable mode.
+pub fn init_portable_flag() -> Result<()> {
+    use tauri::utils::platform::current_exe;
+
+    let app_exe = current_exe()?;
+    if let Some(dir) = app_exe.parent() {
+        if dir.join(".config").join("PORTABLE").exists() {
+            PORTABLE_FLAG.get_or_init(|| true);
+        }
+    }
+    PORTABLE_FLAG.get_or_init(|| false);
+    Ok(())
+}
+
 #[cfg(not(feature = "verge-dev"))]
 pub static APP_ID: &str = "io.github.clash-verge-rev.clash-verge-rev";
 #[cfg(not(feature = "verge-dev"))]
@@ -24,8 +49,19 @@ pub static PROFILE_YAML: &str = "profiles.yaml";
 /// Marks that the one-shot raise of too-short auto-update intervals has already run.
 pub static UPDATE_INTERVAL_MIGRATED: &str = ".update-interval-migrated";
 
-/// Uses the same platform data resolver as Tauri, including before its handle exists.
+/// Resolves the app data directory, honoring portable mode.
 pub fn app_home_dir() -> Result<PathBuf> {
+    if *PORTABLE_FLAG.get_or_init(|| false) {
+        let app_exe = tauri::utils::platform::current_exe()?;
+        // Best-effort canonicalization; fall back to the raw path
+        // (e.g. removable drives where canonicalize fails).
+        let app_exe = dunce::canonicalize(&app_exe).unwrap_or(app_exe);
+        let app_dir = app_exe
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("failed to get the portable app dir"))?;
+        return Ok(app_dir.join(".config").join(APP_ID));
+    }
+
     ::dirs::data_dir()
         .map(|root| root.join(APP_ID))
         .ok_or_else(|| anyhow::anyhow!("Failed to get the app home directory"))

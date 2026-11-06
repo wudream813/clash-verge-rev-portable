@@ -154,6 +154,10 @@ fn handle_singleton_startup(
 }
 
 pub fn run() -> std::process::ExitCode {
+    // Portable-mode detection MUST happen before anything touches the data
+    // directory (the Windows preinit owner-repair below resolves it first).
+    let _ = utils::dirs::init_portable_flag();
+
     #[cfg(all(target_os = "macos", not(debug_assertions), not(test), not(feature = "verge-dev")))]
     if utils::macos_launch_guard::enforce_before_initialization() == utils::macos_launch_guard::LaunchDisposition::Exit
     {
