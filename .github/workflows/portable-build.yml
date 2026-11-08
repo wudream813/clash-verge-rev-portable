@@ -2,7 +2,8 @@ name: Build Portable Release
 
 # 每天 03:23（Asia/Shanghai）检查上游是否有新的稳定版 tag；
 # 有则把 portable 分支 rebase 到新 tag 上（补丁冲突时自动开 issue），
-# 然后用 windows-latest 构建便携版并发布到 Releases。
+# 然后用 windows-latest 构建 Windows 便携版、用 ubuntu-22.04 构建 Linux 便携版，
+# 一起发布到 Releases。
 # 也可以在 Actions 页面手动 Run workflow（force=true 可强制重装同一版本）。
 
 on:
@@ -228,7 +229,8 @@ jobs:
           - ⚠️ 非官方构建，不提供任何担保；要正式版请使用上游官方构建
 
           ## 使用
-          解压到任意本地目录，双击 \`clash-verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
+          Windows：解压到任意本地目录，双击 \`clash-verge.exe\` 即可。数据保存在同目录的 \`.config\\\` 里，整文件夹可拷走/备份。
+          Linux：下载 \`Clash.Verge_${VERSION}_linux-x64-portable.tar.gz\`，解压后运行 \`Clash Verge/clash-verge\`（依赖 WebKitGTK 4.1 与 libayatana-appindicator，Debian/Ubuntu 见 PORTABLE.md）。
 
           ## 升级
           下载新版本 zip，解压覆盖旧目录即可（\`.config\` 数据会保留）。
@@ -256,3 +258,138 @@ jobs:
           gh issue create --repo "$GITHUB_REPOSITORY" \
             --title "portable build failed for v${{ steps.ver.outputs.version }} (${{ github.run_id }})" \
             --body "构建 v${{ steps.ver.outputs.version }} 便携版失败，日志见：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true
+
+  build-linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    # 依赖 windows job 先完成（rebase + 建 release + 传 Windows 资产），Linux 在此之后构建上传
+    needs: update-and-release
+    if: github.event_name != 'push' || github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout portable branch
+        uses: actions/checkout@v7
+        with:
+          ref: portable
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Read version
+        id: ver
+        shell: bash
+        run: |
+          v=$(grep -m1 -E '"version"' src-tauri/tauri.conf.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=portable-v$v" >> "$GITHUB_OUTPUT"
+
+      - name: Check if the linux asset already exists
+        id: rel
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG='${{ steps.ver.outputs.tag }}'
+          VERSION='${{ steps.ver.outputs.version }}'
+          FORCE='${{ inputs.force || false }}'
+          if [ "$FORCE" != "true" ] && gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' | grep -qx "Clash.Verge_${VERSION}_linux-x64-portable.tar.gz"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "linux asset already exists, skipping build"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install system dependencies
+        if: steps.rel.outputs.exists != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxslt1.1 libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install pnpm
+        if: steps.rel.outputs.exists != 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Install Node
+        if: steps.rel.outputs.exists != 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: '26.13.0'
+
+      - name: Install Rust stable
+        if: steps.rel.outputs.exists != 'true'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.99.1'
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Rust cache
+        if: steps.rel.outputs.exists != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target'
+
+      - name: pnpm install & prebuild (download mihomo core)
+        if: steps.rel.outputs.exists != 'true'
+        run: |
+          pnpm i
+          pnpm run prebuild x86_64-unknown-linux-gnu
+
+      - name: Tauri build (no bundles)
+        if: steps.rel.outputs.exists != 'true'
+        run: pnpm tauri build --target x86_64-unknown-linux-gnu --no-bundle
+        env:
+          NODE_OPTIONS: '--max-old-space-size=4096'
+
+      - name: Assemble portable tarball
+        if: steps.rel.outputs.exists != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          v='${{ steps.ver.outputs.version }}'
+          stage="portable-stage/Clash Verge"
+          rm -rf portable-stage
+          mkdir -p "$stage"
+          cp "target/x86_64-unknown-linux-gnu/release/clash-verge" "$stage/clash-verge"
+          # prebuild 下载的 sidecar 带 target-triple 后缀，这里去掉以对齐 exe 同目录的运行时查找名
+          shopt -s nullglob
+          for name in verge-mihomo verge-mihomo-alpha clash-verge-service clash-verge-service-install clash-verge-service-uninstall; do
+            f="src-tauri/sidecar/${name}-x86_64-unknown-linux-gnu"
+            if [ -f "$f" ]; then cp "$f" "$stage/$name"; fi
+          done
+          shopt -u nullglob
+          cp -r src-tauri/resources "$stage/resources"
+          mkdir -p "$stage/.config"
+          touch "$stage/.config/PORTABLE"
+          chmod 755 "$stage/clash-verge" "$stage/verge-mihomo" "$stage/verge-mihomo-alpha" 2>/dev/null || true
+          chmod 755 "$stage"/clash-verge-service* 2>/dev/null || true
+          tar -czf "Clash.Verge_${v}_linux-x64-portable.tar.gz" -C portable-stage "Clash Verge"
+          ls -la "Clash.Verge_${v}_linux-x64-portable.tar.gz"
+          tar -tzf "Clash.Verge_${v}_linux-x64-portable.tar.gz" | head -25
+
+      - name: Upload linux portable asset to the release
+        if: steps.rel.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG='${{ steps.ver.outputs.tag }}'
+          VERSION='${{ steps.ver.outputs.version }}'
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "Clash.Verge_${VERSION}_linux-x64-portable.tar.gz" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "Clash.Verge_${VERSION}_linux-x64-portable.tar.gz" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target portable \
+              --title "Clash Verge Rev v${VERSION} 便携版（非官方构建）" \
+              --notes "非官方便携版（Linux），跟进上游 v${VERSION} 自动构建。"
+          fi
+
+      - name: Open issue on unexpected failure
+        if: failure() && steps.rel.outputs.exists != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "linux portable build failed for v${{ steps.ver.outputs.version }} (${{ github.run_id }})" \
+            --body "构建 Linux 便携版失败，日志见：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" || true

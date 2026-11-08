@@ -6,14 +6,23 @@
 
 ## 下载
 
-见 [Releases](../../releases)：`Clash.Verge_<版本>_x64-portable.zip`
+见 [Releases](../../releases)：
+- Windows：`Clash.Verge_<版本>_x64-portable.zip`
+- Linux：`Clash.Verge_<版本>_linux-x64-portable.tar.gz`（x86_64）
 
 ## 使用
 
+**Windows**
 1. 解压到本地目录，例如 `D:\Tools\ClashVerge`（NTFS 最佳；exFAT/FAT32 盘也可以，见下方说明）
 2. 双击 `clash-verge.exe`
 3. 所有数据（订阅、设置、内核配置）保存在 `<解压目录>\.config\` 中，整个文件夹可拷贝/备份
 4. 不依赖 `%APPDATA%`，U 盘随身模式可用（exFAT 下服务模式不可用，见下方说明）
+
+**Linux**
+1. 解压到本地目录，例如 `~/Tools/clash-verge`，运行 `./Clash\ Verge/clash-verge`
+2. 运行时依赖（Debian/Ubuntu）：`sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxslt1.1 patchelf`（也可以只装这几个的 runtime 包：`libwebkit2gtk-4.1-0 libayatana-appindicator3-1`）
+3. 数据保存在 `<解压目录>/.config/io.github.clash-verge-rev.clash-verge-rev/`，整文件夹可拷贝/备份，不依赖 `~/.local/share`
+4. 服务模式（TUN/接管流量）：需要先运行 `clash-verge-service-install`（需 root/polkit），同 Windows 一样是否可用取决于文件系统；普通桌面环境推荐 **Sidecar** 运行模式
 
 ## 与官方正式版的区别
 
@@ -55,7 +64,8 @@ CI（`.github/workflows/portable-build.yml`）每天运行：
 
 1. 检查上游最新稳定版 tag（如 `v2.5.11`）
 2. 若分支落后，把补丁 commit rebase 到新 tag 上并 force-push；冲突时自动开 issue
-3. 若该版本尚无 `portable-v<版本>` release，则构建 NSIS 安装包 → 静默安装到暂存目录 → 删卸载器 → 注入空的 `.config\PORTABLE` → 打包 zip 并发布 release（同时上传 `update.json` 供应用内检查更新）
+3. Windows（`update-and-release` job）：若该版本尚无 `portable-v<版本>` release，则构建 NSIS 安装包 → 静默安装到暂存目录 → 删卸载器 → 注入空的 `.config\PORTABLE` → 打包 zip 并发布 release（同时上传 `update.json` 供应用内检查更新）
+4. Linux（`build-linux` job，依赖前者先完成）：若该版本 release 尚无 `Clash.Verge_<版本>_linux-x64-portable.tar.gz`，则用 ubuntu-22.04 构建 `clash-verge`（`--no-bundle`），连同 mihomo 内核、service sidecar、`resources/`、`.config/PORTABLE` 一起打 tar.gz 并上传到同一 release
 
 ## 手动构建
 
